@@ -29,15 +29,16 @@ brew install git
 
 ## Step 1: Transfer the Fleet Directory
 
-The entire fleet lives in `~/.hermes/` (symlinked to `~/.arch/`). Transfer the full directory tree.
+The fleet lives in `~/.hermes/` (the real directory). Transfer the full directory tree
+including all agent homes.
 
 **From Ubuntu:**
 ```bash
 # Option A: rsync over SSH (recommended — handles symlinks)
-rsync -avz --copy-links ~/.hermes/ deeog@MAC_MINI_IP:~/.hermes-transfer/
+rsync -avz -L ~/.hermes/ deeog@MAC_MINI_IP:~/.hermes-transfer/
 
 # Option B: tar archive (preserves symlinks)
-tar czf hermes-fleet.tar.gz -C ~ .hermes .arch .oracle .eureka .aurus
+tar czhf hermes-fleet.tar.gz -C ~ .hermes .oracle .eureka .aurus
 scp hermes-fleet.tar.gz deeog@MAC_MINI_IP:~/
 ```
 
@@ -65,17 +66,56 @@ rm -f ~/.hermes/bin/tirith
 
 ---
 
-## Step 2: Fix the Home Directory Symlink
+## Step 2: Handle the Directory Restructuring
 
-On Ubuntu, `~/.hermes` is a symlink to `~/.arch`. Verify this survived the transfer:
+The directory layout is being restructured. The old layout had `~/.hermes` as a symlink
+pointing to `~/.arch` (the real directory). The new layout reverses this:
+
+- **`~/.hermes`** is now the REAL directory (primary)
+- **`~/.arch`** is a backward-compatibility symlink → `~/.hermes`
+- **`~/.oracle`**, **`~/.eureka`**, **`~/.aurus`** are proper CLI entry points, each with
+  their own `SOUL.md` and `config.yaml`
+
+### If migrating BEFORE the rename on Ubuntu:
+
+The transferred data will still have the old layout (`~/.arch` is real, `~/.hermes` is a
+symlink). Perform the rename on macOS:
 
 ```bash
-ls -la ~/.hermes
-# Should show: ~/.hermes -> .arch
+# 1. Remove the old symlink (if it exists)
+rm -f ~/.hermes
 
-# If broken, recreate:
-ln -sfn ~/.arch ~/.hermes
+# 2. Rename the real directory
+mv ~/.arch ~/.hermes
+
+# 3. Create a backward-compat symlink for anything referencing ~/.arch
+ln -sfn ~/.hermes ~/.arch
+
+# 4. Verify
+ls -la ~/.arch
+# Should show: ~/.arch -> /Users/deeog/.hermes
+ls -la ~/.hermes
+# Should show a real directory (no arrow)
 ```
+
+### If migrating AFTER the rename on Ubuntu:
+
+The rename already happened before transfer. `~/.hermes` is already the real directory.
+Just create the backward-compat symlink:
+
+```bash
+# Create backward-compat symlink
+ln -sfn ~/.hermes ~/.arch
+
+# Verify
+ls -la ~/.arch
+# Should show: ~/.arch -> /Users/deeog/.hermes
+```
+
+**Cross-platform note:** All symlinks inside agent homes use relative paths
+(e.g., `../.hermes/.env`) specifically for portability between Ubuntu and macOS.
+This means home directory differences (`/home/deeog/` vs `/Users/deeog/`) are
+handled automatically.
 
 ---
 
@@ -111,9 +151,11 @@ uv pip install -e .
 
 ## Step 4: Fix Symlinks in Agent Homes
 
-The agent home directories (`~/.oracle`, `~/.eureka`, `~/.aurus`) have symlinks with absolute Ubuntu paths (`/home/deeog/.hermes/...`). On macOS, home is `/Users/deeog/...`.
+The agent home directories (`~/.oracle`, `~/.eureka`, `~/.aurus`) may have symlinks with
+absolute Ubuntu paths (`/home/deeog/.hermes/...`). On macOS, home is `/Users/deeog/...`.
 
-**Recreate all symlinks with relative paths:**
+Each agent home is a proper CLI entry point with its own identity files. Recreate all
+symlinks with relative paths and ensure per-agent files exist:
 
 ```bash
 # Oracle
@@ -121,26 +163,42 @@ cd ~/.oracle
 ln -sf ../.hermes/.env .env
 ln -sf ../.hermes/auth.json auth.json
 ln -sf ../.hermes/agent-templates/SHARED_FOUNDATION.md SHARED_FOUNDATION.md
+# Per-agent identity files (create if missing):
+touch SOUL.md config.yaml
 
 # Eureka
 cd ~/.eureka
 ln -sf ../.hermes/.env .env
 ln -sf ../.hermes/auth.json auth.json
 ln -sf ../.hermes/agent-templates/SHARED_FOUNDATION.md SHARED_FOUNDATION.md
+# Per-agent identity files (create if missing):
+touch SOUL.md config.yaml
 
 # Aurus
 cd ~/.aurus
 ln -sf ../.hermes/.env .env
 ln -sf ../.hermes/auth.json auth.json
 ln -sf ../.hermes/agent-templates/SHARED_FOUNDATION.md SHARED_FOUNDATION.md
+# Per-agent identity files (create if missing):
+touch SOUL.md config.yaml
 ```
+
+**Per-agent files explained:**
+- `SOUL.md` — Each agent's personality/identity definition. This is unique per agent
+  and defines how it presents itself. Populate with agent-specific content.
+- `config.yaml` — Per-agent configuration overrides. Agents read their own config
+  first, falling back to `~/.hermes/config.yaml` for shared settings.
 
 **Verify:**
 ```bash
-# Should all show relative targets, not /home/deeog/...
+# Symlinks should show relative targets, not /home/deeog/...
 ls -la ~/.oracle/.env ~/.eureka/.env ~/.aurus/.env
 ls -la ~/.oracle/auth.json ~/.eureka/auth.json ~/.aurus/auth.json
 ls -la ~/.oracle/SHARED_FOUNDATION.md ~/.eureka/SHARED_FOUNDATION.md ~/.aurus/SHARED_FOUNDATION.md
+
+# Per-agent files should exist as real files
+ls -la ~/.oracle/SOUL.md ~/.eureka/SOUL.md ~/.aurus/SOUL.md
+ls -la ~/.oracle/config.yaml ~/.eureka/config.yaml ~/.aurus/config.yaml
 ```
 
 ---
@@ -229,7 +287,18 @@ ls -lt ~/.hermes/sessions/ | head -10
 
 # 5. Check memories are accessible
 ls -la ~/.hermes/memories/
+
+# 6. Verify CLI access per agent (each agent home should resolve correctly)
+HERMES_HOME=~/.oracle hermes --help
+HERMES_HOME=~/.eureka hermes --help
+HERMES_HOME=~/.aurus hermes --help
+
+# 7. Verify backward-compat access via ~/.arch
+HERMES_HOME=~/.arch hermes --help
 ```
+
+If any `HERMES_HOME` test fails, check that the agent home directory exists and contains
+the expected symlinks (Step 4).
 
 ---
 
@@ -259,34 +328,44 @@ launchctl load ~/Library/LaunchAgents/com.hermes.gateway.plist
 | 1 | systemd service | BLOCKER | Use `scripts/hermes-gateway install` (launchd support built-in) |
 | 2 | Python venv (Linux binary) | BLOCKER | `uv venv venv && uv pip install -e .` |
 | 3 | Hermes CLI shebang | BLOCKER | Reinstalled automatically with venv recreation |
-| 4 | Agent home symlinks (absolute paths) | WARNING | Recreate with relative paths (Step 4) |
-| 5 | tirith binary (Linux ELF) | WARNING | Disable or obtain macOS binary (Step 7) |
-| 6 | WhatsApp bridge node_modules | WARNING | `npm install` fresh on macOS (Step 5) |
+| 4 | Directory restructuring (arch → hermes) | BLOCKER | Rename `~/.arch` → `~/.hermes`, create compat symlink (Step 2) |
+| 5 | Agent home symlinks (absolute paths) | WARNING | Recreate with relative paths (Step 4) |
+| 6 | Per-agent identity files | WARNING | Create `SOUL.md` and `config.yaml` in each agent home (Step 4) |
+| 7 | tirith binary (Linux ELF) | WARNING | Disable or obtain macOS binary (Step 7) |
+| 8 | WhatsApp bridge node_modules | WARNING | `npm install` fresh on macOS (Step 5) |
 
 Items that are already portable (no changes needed):
 - Node bootstrap script (already has macOS support)
-- Config files and .env (no hardcoded Linux paths)
+- Config files and `.env` (no hardcoded Linux paths)
 - Network setup (standard HTTP/WS)
 - File watchers (uses portable mtime checks)
-- No Homebrew/Linuxbrew dependency chains
+- Relative symlinks (portable across Ubuntu ↔ macOS)
 
 ---
 
 ## Optional: Make the Ubuntu Setup Portable Too
 
-To prevent drift between the two machines, consider fixing the absolute symlinks on Ubuntu as well:
+To prevent drift between the two machines, consider applying the directory restructuring
+on Ubuntu as well:
 
 ```bash
-# On Ubuntu — make symlinks relative (same commands as Step 4)
+# On Ubuntu — rename ~/.arch to ~/.hermes (if not already done)
+mv ~/.arch ~/.hermes
+ln -sfn ~/.hermes ~/.arch
+
+# On Ubuntu — make symlinks relative in agent homes
 for agent_home in ~/.oracle ~/.eureka ~/.aurus; do
     cd "$agent_home"
     ln -sf ../.hermes/.env .env
     ln -sf ../.hermes/auth.json auth.json
     ln -sf ../.hermes/agent-templates/SHARED_FOUNDATION.md SHARED_FOUNDATION.md
+    # Ensure per-agent files exist
+    touch SOUL.md config.yaml
 done
 ```
 
-This way both machines use the same relative symlink structure, making future transfers seamless.
+This way both machines use the same relative symlink structure and the same primary
+directory (`~/.hermes`), making future transfers seamless.
 
 ---
 

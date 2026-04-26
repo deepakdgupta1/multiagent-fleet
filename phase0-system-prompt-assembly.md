@@ -1,5 +1,7 @@
 # Phase 0: System Prompt Assembly Investigation
 
+> **Path note:** After directory restructuring, `~/.hermes` will be the real directory. Currently it is a symlink to `~/.arch`.
+
 ## Executive Summary
 
 The identity confusion between Oracle and Arch stems from **three compounding issues**:
@@ -7,6 +9,12 @@ The identity confusion between Oracle and Arch stems from **three compounding is
 1. **`file://` URIs in channel_prompts are NOT resolved** — the literal string `file://personas/arch.md` is passed to the LLM, not the file contents.
 2. **APPEND merge behavior** — even if file resolution worked, channel_prompts are APPENDED to the base prompt, not replacing it. Both Oracle AND Arch identities would coexist.
 3. **SOUL.md always defines Oracle** — it is the unconditional primary identity for ALL channels.
+
+---
+
+## Significance
+
+This investigation revealed that persona files have NEVER been loaded by the gateway. For the entire lifetime of the fleet (April 13-26), all four agents have been running as Oracle with a literal file path string appended. The specialists (Arch, Eureka, Aurus) have never operated as designed. This changes the priority and framing of all architectural decisions — any assessment of shared-home vs isolation was based on agents that were never distinct.
 
 ---
 
@@ -87,7 +95,7 @@ This is passed to AIAgent as `ephemeral_system_prompt=combined_ephemeral` (line 
 The base system prompt is assembled from layers:
 
 ```
-Layer 1: SOUL.md content (from ~/.arch/SOUL.md)    <-- "I am Oracle"
+Layer 1: SOUL.md content (from ~/.hermes/SOUL.md)    <-- "I am Oracle"
 Layer 2: Tool guidance (memory, session_search, skills)
 Layer 3: Nous subscription prompt
 Layer 4: Tool use enforcement
@@ -105,7 +113,7 @@ Layer 10: Platform hints (discord formatting)
 # API-call time only so it stays out of the cached/stored system prompt.
 ```
 
-SOUL.md is loaded via `load_soul_md()` from `~/.arch/SOUL.md` (line 4377):
+SOUL.md is loaded via `load_soul_md()` from `~/.hermes/SOUL.md` (line 4377):
 ```python
 _soul_content = load_soul_md()
 if _soul_content:
@@ -135,7 +143,7 @@ if effective_system:
 ## Final System Prompt for #arch Channel
 
 ```
-[Layer 1 - SOUL.md from ~/.arch/SOUL.md]
+[Layer 1 - SOUL.md from ~/.hermes/SOUL.md]
 # SOUL.md — Oracle (Your Alter Ego)
 ...
 **Name:** Oracle
@@ -176,7 +184,7 @@ Evidence:
 - Test file (`test_config.py`) uses plain strings like `"Research mode"` — confirming the expected format is inline text, not file references
 - No `file://` handling exists in any gateway prompt resolution code
 
-The personas/arch.md file EXISTS at `~/.arch/personas/arch.md` with proper Arch identity content, but it is never loaded.
+The personas/arch.md file EXISTS at `~/.hermes/personas/arch.md` with proper Arch identity content, but it is never loaded.
 
 ### Issue 2: APPEND Semantics Create Dual Identity
 
@@ -207,6 +215,8 @@ The LLM receives conflicting identity instructions in the same system prompt.
 | #eureka (1493461225567420416) | `file://personas/eureka.md` | SOUL.md + literal string | Oracle + garbage |
 | #aurus (1493461326662467624) | `file://personas/aurus.md` | SOUL.md + literal string | Oracle + garbage |
 
+Note: "Oracle + garbage" means the LLM received Oracle's full SOUL.md identity plus the literal string `file://personas/arch.md` — not the persona content.
+
 ---
 
 ## Recommendations for Multi-Agent Fleet
@@ -229,11 +239,11 @@ The LLM receives conflicting identity instructions in the same system prompt.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `~/.arch/config.yaml` | 297-306 | channel_prompts config with file:// URIs |
-| `~/.arch/SOUL.md` | 1-83 | Oracle identity (always loaded as Layer 1) |
-| `~/.arch/personas/arch.md` | 1-41 | Arch persona (never loaded) |
-| `~/.arch/personas/eureka.md` | 1-40 | Eureka persona (never loaded) |
-| `~/.arch/personas/aurus.md` | 1-44 | Aurus persona (never loaded) |
+| `~/.hermes/config.yaml` | 297-306 | channel_prompts config with file:// URIs |
+| `~/.hermes/SOUL.md` | 1-83 | Oracle identity (always loaded as Layer 1) |
+| `~/.hermes/personas/arch.md` | 1-41 | Arch persona (never loaded) |
+| `~/.hermes/personas/eureka.md` | 1-40 | Eureka persona (never loaded) |
+| `~/.hermes/personas/aurus.md` | 1-44 | Aurus persona (never loaded) |
 | `gateway/platforms/base.py` | 955-982 | `resolve_channel_prompt()` - no file:// handling |
 | `gateway/platforms/discord.py` | 2703-2706 | Discord adapter channel prompt resolution |
 | `gateway/config.py` | 589-594 | Config loading - passes channel_prompts through |

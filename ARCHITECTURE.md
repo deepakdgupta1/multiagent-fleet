@@ -1,6 +1,6 @@
 # Multi-Agent Fleet — Solution Design & Architecture
 
-> Status: DRAFT v2 (April 26, 2026)
+> Status: DRAFT v3 (April 27, 2026)
 > Repository: https://github.com/deepakdgupta1/multiagent-fleet
 > Owner: Deepak (deep.g)
 
@@ -8,16 +8,17 @@
 
 ## 1. Problem Statement
 
-We have a 4-agent fleet (Oracle, Arch, Eureka, Aurus) running on Discord + WhatsApp. It was assembled quickly over April 13-19 and has not been matured. The current state has real problems:
+We have a 4-agent fleet (Oracle, Arch, Eureka, Aurus) running on Discord + WhatsApp. It was assembled quickly over April 13-19 and has not been matured. Phase 0 investigation (April 26-27) revealed that **personas have never loaded correctly** — all agents have been running as Oracle for the fleet's entire lifetime.
 
 ### Symptoms
 
-1. **Identity confusion** — Arch had to reason through whether it was Oracle or Arch ("let me check the system prompt again... file://personas/arch.md"). The persona swap should be seamless. This was discovered because reasoning blocks leaked to Discord (see point 2), revealing the internal confusion.
-2. **Reasoning blocks visible in Discord** — Arch exposed its raw reasoning block ("💭 Reasoning: ...") to the user. This is what surfaced symptom #1. Status: intentionally left as-is for now. The reasoning blocks provide useful transparency in a private single-user context. No harmful consequences have been identified in our setup. Revisit if/when the fleet becomes multi-user or public-facing.
+1. **Identity confusion** — Arch had to reason through whether it was Oracle or Arch ("let me check the system prompt again... file://personas/arch.md"). The persona swap should be seamless. Root cause identified: `file://` URIs are never resolved, the literal string is passed to the LLM (see [phase0-system-prompt-assembly.md](phase0-system-prompt-assembly.md)).
+2. **Reasoning blocks visible in Discord** — Arch exposed its raw reasoning block ("💭 Reasoning: ...") to the user. This is what surfaced symptom #1. **Status: Intentionally kept as-is.** The reasoning blocks provide useful transparency in a private single-user context. No harmful consequences identified. Revisit if/when the fleet becomes multi-user or public-facing.
 3. **No isolation** — All 4 personas share one Hermes home (`~/.hermes` → `~/.arch`). One gateway process serves all channels. There is no tool, memory, or state isolation between agents.
 4. **Missing cross-agent visibility** — Oracle cannot see what happened in Arch/Eureka/Aurus conversations without manual `session_search`. The proposed `fleet/activity.md` shared log was never implemented.
-5. **3 of 4 agents are shells** — Oracle, Eureka, and Aurus have empty `skills/` directories. Only Arch (the shared home) has real skills.
+5. **3 of 4 agent homes are shells** — Oracle, Eureka, and Aurus have home directories but they are decorative — the single gateway process uses Arch's config, skills, sessions, and memories. Plan: wire them as proper CLI entry points (see Section 6, Phase 2).
 6. **No inter-agent communication** — Oracle cannot programmatically post in other channels. The `discord_post` tool was discussed but never built.
+7. **Personas never loaded** (discovered April 26) — For the fleet's entire lifetime, all agents received Oracle's SOUL.md as their identity. The channel_prompts `file://` references were passed as literal strings. See [phase0-system-prompt-assembly.md](phase0-system-prompt-assembly.md).
 
 ---
 
@@ -28,7 +29,7 @@ We have a 4-agent fleet (Oracle, Arch, Eureka, Aurus) running on Discord + Whats
 │                   Single Hermes Process                  │
 │            (systemd: hermes-gateway.service)             │
 │                  HERMES_HOME=~/.hermes                   │
-│                      (symlink → ~/.arch)                 │
+│                   (symlink → ~/.arch)                    │
 │                                                         │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐ │
 │  │  Oracle   │  │   Arch   │  │  Eureka  │  │ Aurus  │ │
@@ -37,6 +38,8 @@ We have a 4-agent fleet (Oracle, Arch, Eureka, Aurus) running on Discord + Whats
 │  └──────────┘  └──────────┘  └──────────┘  └────────┘ │
 │         Persona swap via channel_prompts in config.yaml │
 │         file://personas/{arch,eureka,aurus}.md          │
+│         ** BROKEN: file:// never resolved **            │
+│         ** ALL agents receive Oracle's SOUL.md **       │
 └─────────────────────────────────────────────────────────┘
          │                          │
          │ Discord (1 bot token)    │ WhatsApp (bridge.js)
@@ -52,33 +55,36 @@ We have a 4-agent fleet (Oracle, Arch, Eureka, Aurus) running on Discord + Whats
 
 | Item | Value |
 |------|-------|
-| Gateway process | 1 (systemd service) |
-| HERMES_HOME | `~/.hermes` → `~/.arch` (symlink) |
+| Gateway process | 1 (systemd service on Ubuntu Desktop) |
+| HERMES_HOME | `~/.hermes` → `~/.arch` (symlink; rename to `~/.hermes` real dir planned) |
 | Discord bot tokens | 1 (shared) |
 | WhatsApp bridge | 1 (Node.js/Baileys, Oracle only) |
-| Persona mechanism | `channel_prompts` with `file://` references |
-| Agent homes | `~/.oracle`, `~/.arch`, `~/.aurus`, `~/.eureka` |
-| Startup script | `~/.arch/bin/start-agents.sh` (NOT used by systemd) |
+| Persona mechanism | `channel_prompts` with `file://` references — **BROKEN (never resolved)** |
+| Persona loading | All agents receive Oracle's SOUL.md. Persona files exist but are never read. |
+| Agent homes | `~/.oracle` (has state.db, cron, WhatsApp session, skills, SOUL.md), `~/.arch` (active gateway home), `~/.aurus`/`~/.eureka` (SOUL.md + config.yaml only) |
+| Startup script | `~/.arch/bin/start-agents.sh` (dead code, not used by systemd) |
 | Config | `~/.arch/config.yaml` (shared, single file) |
+| Planned host | Mac Mini (macOS, 24/7 operation, launchd) — see [MIGRATION-GUIDE.md](MIGRATION-GUIDE.md) |
 
 ### Discord Channel Map
 
-| Channel | ID | Persona File |
-|---------|----:|-------------|
-| #assistant (Oracle) | 1465562736451911838 | (default SOUL.md = Oracle) |
-| #code (Arch) | 1493461055618285670 | `file://personas/arch.md` |
-| #content (Eureka) | 1493461225567420416 | `file://personas/eureka.md` |
-| #money (Aurus) | 1493461326662467624 | `file://personas/aurus.md` |
+| Channel | ID | Persona File | Actually Loaded |
+|---------|----:|-------------|----------------|
+| #assistant (Oracle) | 1465562736451911838 | (default SOUL.md = Oracle) | Oracle (correct) |
+| #code (Arch) | 1493461055618285670 | `file://personas/arch.md` | Oracle + literal string "file://personas/arch.md" |
+| #content (Eureka) | 1493461225567420416 | `file://personas/eureka.md` | Oracle + literal string "file://personas/eureka.md" |
+| #money (Aurus) | 1493461326662467624 | `file://personas/aurus.md` | Oracle + literal string "file://personas/aurus.md" |
 
-### Agent Home Contents
+### Agent Home Contents (Current)
 
-| | Oracle | Arch | Eureka | Aurus |
+| | Oracle | Arch (active gateway home) | Eureka | Aurus |
 |--|--------|------|--------|-------|
-| SOUL.md | Yes | Yes (base) | Yes | No |
-| config.yaml | Yes (unused) | Yes (active) | Yes (unused) | Yes (unused) |
-| skills/ | 27 dirs (from ~/.arch) | 26 dirs (active) | empty | empty |
+| SOUL.md | Yes | Yes (base, always loaded) | Yes | No |
+| config.yaml | Yes (unused by gateway) | Yes (active) | Yes (unused) | Yes (unused) |
+| skills/ | 27 dirs (symlinked from ~/.arch) | 26 dirs (active) | empty | empty |
 | sessions/ | Yes | Yes | empty | empty |
 | memories/ | Yes | Yes | empty | empty |
+| state.db | Yes (own) | Yes | no | no |
 | SHARED_FOUNDATION.md | symlink | source | symlink | symlink |
 | .env | symlink→~/.arch | source | symlink→~/.arch | symlink→~/.arch |
 
@@ -86,27 +92,24 @@ We have a 4-agent fleet (Oracle, Arch, Eureka, Aurus) running on Discord + Whats
 
 ## 3. Root Cause Analysis
 
-### 3A. Identity Confusion — STATUS: Needs Investigation
+### 3A. Identity Confusion & Persona Loading — STATUS: Root Cause Identified
 
-**Symptom:** Arch reasoned about whether it was Oracle or Arch, visible in reasoning tokens.
+**Symptom:** All agents run as Oracle. Persona files are never loaded.
 
-**What we know:**
-- The base SOUL.md says "I am Oracle" (it IS Oracle's SOUL.md)
-- Channel prompts load via `file://personas/arch.md` for Arch's channel
-- The agent must reconcile these two conflicting identity sources
+**Root causes (3 compounding bugs, all in gateway code):**
 
-**What we DON'T know (investigation needed):**
-1. How does `channel_prompts` actually merge with the base system prompt? Does it REPLACE, APPEND, or PREPEND? This is in `gateway/platforms/base.py`.
-2. What does the final assembled system prompt look like for each channel? We need to see the exact output.
-3. Is SOUL.md even the problem, or is it the merge behavior?
+1. **`file://` URIs never resolved** — `resolve_channel_prompt()` in `base.py` does `str(prompt).strip()` with no URI handling. The literal string `file://personas/arch.md` is passed to the LLM, not the file contents.
+2. **APPEND merge semantics** — `channel_prompts` are APPENDED after SOUL.md at API call time, not replacing it. Even if file resolution worked, both Oracle AND Arch identities would coexist in the system prompt.
+3. **SOUL.md is global** — `load_soul_md()` reads from `$HERMES_HOME/SOUL.md` for ALL channels. There is no per-channel SOUL.md mechanism.
 
-**Investigation steps before any fix is designed:**
-1. Read `gateway/platforms/base.py` — understand the channel_prompts merge logic
-2. Read the gateway session handler — trace how SOUL.md + channel_prompt are assembled into the final system message
-3. Send a test message to each Discord channel and log the exact system prompt each agent receives
-4. Based on the actual assembled prompt, design the minimal fix
+**Investigation:** Complete. Full technical trace in [phase0-system-prompt-assembly.md](phase0-system-prompt-assembly.md).
 
-**No fix will be prescribed until this investigation is complete.**
+**Fix specification:** Pending. Three fixes needed:
+- Implement `file://` resolution in `resolve_channel_prompt()`
+- Change merge semantics from APPEND to REPLACE-SOUL when channel_prompt is present
+- Support per-channel SOUL.md loading
+
+**No fix will be applied until specification is complete and reviewed.**
 
 ### 3B. Reasoning Block Visibility — STATUS: Deferred
 
@@ -114,177 +117,199 @@ The reasoning blocks are visible in Discord. This is what surfaced the identity 
 
 **Assessment:** In our current context (private Discord server, single user), this is actually useful transparency. No harmful consequences identified. The reasoning blocks helped diagnose the real problem. Leaving as-is until a concrete harm is identified.
 
-### 3C. No Agent Isolation — STATUS: Architectural Decision Needed
+### 3C. No Agent Isolation — STATUS: Trial Planned
 
-Everything runs from `~/.arch` (via `~/.hermes` symlink). Oracle, Eureka, and Aurus have home directories but they're decorative — the single gateway process uses Arch's config, Arch's skills, Arch's sessions, Arch's memories. The other homes exist but aren't wired to anything.
+Everything runs from `~/.arch` (via `~/.hermes` symlink). Oracle, Eureka, and Aurus have home directories but they're not wired to the gateway.
 
-This is a deliberate architectural choice with real trade-offs (see Q1 in Section 5).
+**Decision:** Trial week with shared gateway home + per-agent CLI homes. Personas have never worked, so we observe behavior with correct personas first before architecting isolation. See [SHARING-ISOLATION-ANALYSIS.md](SHARING-ISOLATION-ANALYSIS.md) for trial framework (hypotheses H1-H5).
 
 ### 3D. Cross-Agent Blindness — STATUS: Known Gap
 
-Oracle has no structured way to know what happened in specialist channels. The proposed `fleet/activity.md` was never created. `session_search` works but requires Oracle to actively search and is not automatic.
+Oracle has no structured way to know what happened in specialist channels. `session_search` works but requires Oracle to actively search and is not automatic.
+
+**Decision:** Start with delegate-only (Option C). Revisit when cross-agent visibility becomes a real pain point.
 
 ---
 
 ## 4. Open Questions
 
-These require your decision before implementation can proceed.
+### Q1: Agent Isolation Level — STATUS: Trial Decided
 
-### Q1: Agent Isolation Level
+**Decision: Proceed with shared gateway home for trial week.** Rationale:
+- Personas have never worked correctly — premature to architect isolation before observing correct persona behavior
+- Trial tests 5 hypotheses (H1-H5) to validate or falsify shared home
+- **Likely end state is isolation** based on three arguments:
+  1. **Token efficiency**: Lean agents with relevant-only skills = better reasoning + lower token cost. Skills loading is the biggest token waste source.
+  2. **Fleet as infrastructure**: The fleet is central infrastructure for ALL future projects. Getting isolation right has exponential ROI.
+  3. **Quality**: No cross-contamination between domains. Arch shouldn't see Aurus's financial context. Aurus shouldn't load GitHub skills.
+- But: we don't have evidence yet because agents have never been distinct. The trial provides that evidence.
 
-**Option A: Shared Home (Current State, Formalized)**
-- One HERMES_HOME, one config.yaml, one set of sessions/memories
-- Personas are overlays via channel_prompts
-- Pros: Simple, no multi-process complexity, shared context, single maintenance surface
-- Cons:
-  - No privacy between agents — Oracle sees Arch's sessions and vice versa, no agent has a private scratchpad
-  - Memory contamination — one agent's saved memories surface in another agent's context (e.g., Arch saving a debugging memory could pollute Aurus's finance answers)
-  - Skill noise — all agents load the same skill set; Aurus doesn't need GitHub skills but gets them anyway (wasted tokens, potential confusion)
-  - Single point of failure — gateway crash kills all 4 agents simultaneously; can't restart Arch without taking down Oracle
-  - Config coupling — changes to config.yaml for one agent's behavior risk breaking others
-  - No permission isolation — any agent can modify any other agent's state files, memories, sessions
-  - Can't scale independently — if Arch needs a different model or more resources, that affects everyone
-  - state.db contention — single SQLite database with concurrent writes from 4 agents through one process
-  - Agents are masks on one face, not truly independent entities — this may be fine forever, or it may become a ceiling when you want Eureka to genuinely operate independently
+See [SHARING-ISOLATION-ANALYSIS.md](SHARING-ISOLATION-ANALYSIS.md) for the complete trial framework.
 
-**Option B: Separate Homes, Single Gateway**
-- Gateway runs from one home, but persona files reference per-agent configs
-- Each agent has its own skills/, memories/, sessions/ subdirectory
-- Pros: Clean separation, agent-specific skill curation, independent state
-- Cons:
-  - Gateway needs modification to support multi-home routing
-  - More complex — the channel_prompts mechanism was not designed for this
-  - Shared context (Oracle seeing all) requires explicit bridging
+### Q2: Channel Naming — STATUS: Low Priority
 
-**Option C: Multi-Process, Multi-Token**
-- Each agent gets its own Discord bot token and gateway process
-- Full isolation
-- Pros: Complete independence, each agent can restart independently, true separation
-- Cons: Requires 4 Discord bot tokens, 4x resource usage (~2.3GB memory per gateway), no shared context by default, significantly more operational complexity
+Current channels (#assistant, #code, #content, #money) should be renamed to (#oracle, #arch, #eureka, #aurus). Discord channel renames preserve IDs — no config breakage.
 
-**Status: Decision needed.**
+### Q3: Inter-Agent Communication — STATUS: Delegate-Only (Option C)
 
-### Q2: Channel Naming
+No direct agent-to-agent communication. Oracle delegates via `delegate_task` and synthesizes results. Revisit when cross-agent visibility becomes a real pain point.
 
-Current Discord channels are named generically (#assistant, #code, #content, #money). Should we rename them to match agent names (#oracle, #arch, #eureka, #aurus)?
+### Q4: Startup Script — STATUS: Dead Code, To Remove
 
-Pro: Reduces user confusion about which channel does what.
-Con: Requires updating channel_prompts channel IDs in config.yaml (Discord generates new IDs on rename... actually, Discord channel renames preserve IDs, so this is a non-issue).
+`~/.arch/bin/start-agents.sh` describes a multi-process architecture that was never used. Systemd runs a single gateway directly. Remove during Phase 2.
 
-**Status: Low priority, straightforward yes/no.**
+### Q5: Memory Scoping — STATUS: Depends on Trial Results
 
-### Q3: Inter-Agent Communication
+If shared home is validated: shared memories with agent-scoped tags.
+If isolation is needed: separate stores with explicit sharing for Oracle's cross-domain visibility.
 
-How should agents communicate with each other?
+### Q6: Skill Curation — STATUS: Depends on Trial Results
 
-**Option A: Fleet Activity Log** — Shared `fleet/activity.md` file that all agents append to. Oracle reads it periodically.
-
-**Option B: Webhook Posts** — Oracle uses Discord webhooks to post summaries in specialist channels.
-
-**Option C: Delegate Only** — No direct agent-to-agent communication. Oracle delegates via `delegate_task` and synthesizes results.
-
-**Status: Start with C. Revisit when cross-agent visibility becomes a real pain point.**
-
-### Q4: Startup & Process Management
-
-Current state: `start-agents.sh` launches 4 processes, but systemd only runs 1. The startup script is not used in production — it's dead code that describes an architecture we didn't end up using.
-
-**Status: Remove the startup script, or update it to reflect reality (single gateway). Low priority.**
-
-### Q5: Memory Scoping
-
-Should agents share memories or have separate memory stores?
-
-**Status: Depends on Q1. If shared home, then shared memories with agent-scoped tags. If separate homes, then separate stores with explicit sharing.**
-
-### Q6: Skill Curation
-
-3 of 4 agents have empty skills directories. Should each agent have its own curated skill set?
-
-**Status: Depends on Q1 and Q3. If shared home with delegate-only, specialists may not need their own skills — Oracle delegates to Arch which has the full set. If specialists handle tasks directly in their channels, they need relevant skills loaded.**
+If shared home is validated: skill filtering within shared skills/ directory.
+If isolation is needed: curated skill subsets per agent home. This is the biggest token efficiency win under isolation.
 
 ---
 
 ## 5. What We Know vs. What We Assume
 
 | Claim | Status | Confidence |
-|-------|--------|-----------|
+|-------|--------|-----------:|
 | Discord enforces 1-token-1-connection | Verified (April 13-19 sessions) | High |
-| Single gateway is running via systemd | Verified (process list, systemctl) | High |
+| Single gateway running via systemd | Verified (process list, systemctl) | High |
 | channel_prompts uses `file://` references | Verified (config.yaml) | High |
+| `file://` references are NEVER resolved | Verified (code trace in phase0 doc) | High |
 | SOUL.md says "I am Oracle" | Verified (file contents) | High |
-| The merge behavior is the cause of identity confusion | **Unverified — assumption** | Low |
-| Shared home is the right architecture | **Unverified — preference** | Medium |
-| Reasoning block visibility is harmless | Assessed for current context | Medium |
-| Agent homes (~/.oracle, ~/.eureka, ~/.aurus) are unused | Verified (symlink structure, empty dirs) | High |
+| Personas have NEVER loaded — all agents run as Oracle | Verified (full assembly trace) | High |
+| The merge behavior (APPEND + global SOUL.md) causes identity confusion | Verified (3 compounding bugs traced) | High |
+| Agent homes (~/.oracle, ~/.eureka, ~/.aurus) are currently unused by gateway | Verified (gateway uses ~/.hermes only) | High |
+| Agent homes CAN serve as CLI entry points | Verified (HERMES_HOME=~/.agent hermes) | High |
+| Shared home is the right architecture for trial week | Assumption — testing via H1-H5 | Medium |
+| Isolation is the likely end state | Informed judgment — token efficiency + quality arguments | Medium-High |
+| Reasoning block visibility is harmless | Assessed for current context only | Medium |
+| Fleet will move to Mac Mini as 24/7 host | Planned, not yet executed | High |
 
 ---
 
 ## 6. Implementation Plan
 
-### Phase 0: Investigation (Before Any Code Changes)
+### Phase 0: Investigation — COMPLETE
+
+| # | Task | Status | Finding |
+|---|------|--------|---------|
+| 0.1 | Trace channel_prompts merge logic in `gateway/platforms/base.py` | Done | `file://` URIs passed as literal strings |
+| 0.2 | Trace ephemeral prompt assembly in `gateway/run.py` | Done | APPEND semantics, not REPLACE |
+| 0.3 | Trace SOUL.md loading in `run_agent.py` | Done | Global single file, no per-channel support |
+| 0.4 | Write up root cause and minimal fix design | Done | 3 compounding bugs, see [phase0-system-prompt-assembly.md](phase0-system-prompt-assembly.md) |
+
+### Phase 1: Persona Loading Fix — NEXT
 
 | # | Task | Why | Complexity |
-|---|------|-----|-----------|
-| 0.1 | Read `gateway/platforms/base.py` — trace channel_prompts merge logic | Understand how SOUL.md + channel prompt are assembled | Easy |
-| 0.2 | Log the exact final system prompt for each of the 4 channels | See what each agent actually receives | Easy |
-| 0.3 | Based on 0.1-0.2, write up the actual cause of identity confusion | Replace assumptions with evidence | Easy |
-| 0.4 | Design the minimal fix based on evidence | Right fix, not assumed fix | Easy |
+|---|------|-----|-----------:|
+| 1.1 | Write specification for 3-bug fix (file:// resolution, REPLACE semantics, per-channel SOUL.md) | Clear implementation target for Arch | Medium |
+| 1.2 | Arch implements the fix in gateway code | Agents should know who they are | Medium |
+| 1.3 | End-to-end verification: all 4 channels respond with correct persona | Validates the fix works | Easy |
 
-### Phase 1: Critical Fixes (After Investigation)
-
-| # | Task | Why | Complexity |
-|---|------|-----|-----------|
-| 1.1 | Fix identity confusion (approach TBD from Phase 0 findings) | Agents should know who they are | TBD |
-| 1.2 | Verify end-to-end: all 4 channels respond with correct persona | Validates the fix | Easy |
-
-### Phase 2: Structural Cleanup (After Phase 1)
+### Phase 2: Directory Restructuring — After Phase 1
 
 | # | Task | Why | Complexity |
-|---|------|-----|-----------|
-| 2.1 | Create `fleet/` directory with shared state structure | Foundation for cross-agent coordination | Easy |
-| 2.2 | Curate skills per persona (depends on Q1/Q6 decisions) | Each agent loads only relevant tools | Medium |
-| 2.3 | Remove dead startup script or update to reflect reality | Eliminate confusion about how fleet starts | Easy |
-| 2.4 | Audit and clean symlinks in agent homes | Remove decorative directories that serve no purpose | Easy |
+|---|------|-----|-----------:|
+| 2.1 | Rename `~/.arch` → `~/.hermes` (real directory) | Eliminate confusing symlink | Easy |
+| 2.2 | Create `~/.arch` as backward-compat symlink → `~/.hermes` | Don't break any hardcoded references | Easy |
+| 2.3 | Wire `~/.oracle`, `~/.eureka`, `~/.aurus` as CLI entry points (own SOUL.md, config.yaml) | Per-agent CLI access | Medium |
+| 2.4 | Fix relative symlinks for .env, auth.json, SHARED_FOUNDATION.md in agent homes | Portability | Easy |
+| 2.5 | Remove dead startup script (`~/.arch/bin/start-agents.sh`) | Eliminate confusion | Easy |
+| 2.6 | Restart gateway, verify all channels + CLI access work | Validates restructuring | Easy |
 
-### Phase 3: Maturation (Ongoing)
+### Phase 3: Trial Week — After Phase 2
+
+Run the fleet with correct personas for 1 week. Collect data for hypotheses H1-H5 per [SHARING-ISOLATION-ANALYSIS.md](SHARING-ISOLATION-ANALYSIS.md).
 
 | # | Task | Why | Complexity |
-|---|------|-----|-----------|
-| 3.1 | Implement fleet activity log (if Q3 moves beyond delegate-only) | Cross-agent visibility | Medium |
-| 3.2 | Add memory scoping with agent tags | Prevent cross-contamination | Medium |
-| 3.3 | Rename Discord channels to match agent names (if Q2 = yes) | Clarity | Easy |
-| 3.4 | Build `discord_post` tool for Oracle (if needed) | Programmatic cross-channel communication | Medium |
-| 3.5 | Add persona-specific system prompt testing | Regression prevention | Medium |
+|---|------|-----|-----------:|
+| 3.1 | Begin trial: observe all 4 channels daily | Collect H1-H5 data | Easy |
+| 3.2 | Log identity coherence, cross-contamination, quality per interaction | Evidence for Q1 decision | Easy |
+| 3.3 | Instrument token usage per channel (if feasible) | H3 data | Medium |
+| 3.4 | Test CLI access per agent home | H5 data | Easy |
+
+### Phase 4: Architecture Decision — After Trial
+
+Based on trial results (see decision matrix in [SHARING-ISOLATION-ANALYSIS.md](SHARING-ISOLATION-ANALYSIS.md)):
+
+| Trial Outcome | Action |
+|---------------|--------|
+| H1 or H2 falsified | Isolation becomes next priority |
+| H3 falsified only | Lean toward isolation, or skill curation within shared home |
+| H4 falsified only | Operational fix, not architectural change |
+| H5 falsified | Fix CLI home wiring |
+| None falsified | Shared home validated, isolation deferred |
+
+### Phase 5: Mac Mini Migration — After Architecture Stabilizes
+
+Move fleet from Ubuntu Desktop to Mac Mini (24/7 host). See [MIGRATION-GUIDE.md](MIGRATION-GUIDE.md).
+
+### Phase 6: Maturation — Ongoing
+
+| # | Task | Why | Complexity |
+|---|------|-----|-----------:|
+| 6.1 | Curate skills per persona (based on Q6 decision) | Each agent loads only relevant tools | Medium |
+| 6.2 | Add memory scoping with agent tags (based on Q5 decision) | Prevent cross-contamination | Medium |
+| 6.3 | Rename Discord channels to match agent names (Q2) | Clarity | Easy |
+| 6.4 | Implement fleet activity log or `discord_post` (if Q3 evolves) | Cross-agent visibility | Medium |
+| 6.5 | Add persona regression tests | Prevent future breakage | Medium |
 
 ---
 
-## 7. File Structure (Current)
+## 7. Target File Structure (Post-Restructuring)
+
+After Phase 2 directory restructuring:
 
 ```
-~/.hermes/                          # Single home (symlinked from ~/.arch)
-├── SOUL.md                         # Oracle's identity (also serves as base for all agents)
+~/.hermes/                          # REAL directory (renamed from ~/.arch)
+├── SOUL.md                         # Oracle's identity (loaded for #oracle channel)
 ├── config.yaml                     # Gateway config with channel_prompts
-├── .env                            # Shared secrets
-├── auth.json                       # Shared auth
+├── .env                            # Shared secrets [REDACTED]
+├── auth.json                       # Shared auth [REDACTED]
 ├── agent-templates/
-│   └── SHARED_FOUNDATION.md        # Universal values
+│   └── SHARED_FOUNDATION.md        # Universal values (symlinked to agent homes)
 ├── personas/
-│   ├── arch.md                     # Arch persona overlay
-│   ├── eureka.md                   # Eureka persona overlay
-│   └── aurus.md                    # Aurus persona overlay
-├── skills/                         # 19+ skills (all agents share these)
-├── sessions/                       # Shared sessions
-├── memories/                       # Shared memories
+│   ├── arch.md                     # Arch persona (loaded for #arch channel after fix)
+│   ├── eureka.md                   # Eureka persona (loaded for #eureka channel after fix)
+│   └── aurus.md                    # Aurus persona (loaded for #aurus channel after fix)
+├── skills/                         # 19+ skills (shared during trial; per-agent post-trial?)
+├── sessions/                       # Shared sessions (during trial)
+├── memories/                       # Shared memories (during trial)
 ├── whatsapp/                       # WhatsApp bridge (Oracle only)
 └── hermes-agent/                   # Hermes source code
 
-~/.oracle/                          # Unused — decorative home directory
-~/.eureka/                          # Unused — decorative home directory
-~/.aurus/                           # Unused — decorative home directory
+~/.arch                             # Backward-compat symlink → ~/.hermes
+
+~/.oracle/                          # CLI entry point for Oracle
+├── SOUL.md                         # Oracle's identity
+├── config.yaml                     # Oracle-specific config
+├── .env                            # → ../.hermes/.env (relative symlink)
+├── auth.json                       # → ../.hermes/auth.json (relative symlink)
+├── SHARED_FOUNDATION.md            # → ../.hermes/agent-templates/SHARED_FOUNDATION.md
+├── skills/                         # Oracle's curated skills (post-trial)
+└── (state.db, cron/, whatsapp session data — currently exists)
+
+~/.eureka/                          # CLI entry point for Eureka
+├── SOUL.md                         # Eureka's identity
+├── config.yaml                     # Eureka-specific config
+├── .env                            # → ../.hermes/.env (relative symlink)
+├── auth.json                       # → ../.hermes/auth.json (relative symlink)
+├── SHARED_FOUNDATION.md            # → ../.hermes/agent-templates/SHARED_FOUNDATION.md
+└── skills/                         # Eureka's curated skills (post-trial)
+
+~/.aurus/                           # CLI entry point for Aurus
+├── SOUL.md                         # Aurus's identity
+├── config.yaml                     # Aurus-specific config
+├── .env                            # → ../.hermes/.env (relative symlink)
+├── auth.json                       # → ../.hermes/auth.json (relative symlink)
+├── SHARED_FOUNDATION.md            # → ../.hermes/agent-templates/SHARED_FOUNDATION.md
+└── skills/                         # Aurus's curated skills (post-trial)
 ```
 
-> Note: The proposed file structure under shared-home vs separate-homes depends on Q1 outcome and will be specified after that decision.
+> Note: During trial week, agent homes are CLI-only access points. The gateway runs from `~/.hermes`. If the trial leads to isolation (Option B), agent homes become the primary operational homes for each agent with the gateway routing to them.
 
 ---
 
@@ -294,26 +319,35 @@ Should agents share memories or have separate memory stores?
 |----------|--------|-----------|
 | Architecture pattern | Single gateway, channel-routed | Discord 1-token constraint; only viable option with 1 token |
 | Reasoning block visibility | Leave as-is for now | Useful transparency, no identified harm in private single-user context |
-| Investigation before fix | Phase 0 required for SOUL.md/identity issue | Follow our own philosophy: reproduce → isolate → root cause → fix |
-| Startup script | Dead code, to be removed or updated | Not used in production, describes abandoned multi-process approach |
+| Investigation before fix | Phase 0 completed | Followed philosophy: reproduce → isolate → root cause → fix. Found 3 compounding bugs. |
+| Q1 trial approach | Shared gateway home + per-agent CLI homes | Personas never worked — observe correct behavior before architecting isolation |
+| Q1 likely end state | Isolation (Option B) | Lean agents, token efficiency, fleet as infrastructure. But evidence first. |
+| Directory structure | Rename `~/.arch` → `~/.hermes`, wire agent homes | Eliminate confusing symlink, enable CLI access per agent |
+| Cross-platform portability | Required (Ubuntu → macOS) | Mac Mini will be 24/7 host. All paths relative. |
+| Q3 inter-agent comms | Delegate-only (Option C) | Start simple, evolve when pain points emerge |
+| Q4 startup script | Remove (dead code) | Not used in production, describes abandoned multi-process approach |
+| Persona fix scope | Fix all 3 bugs (file:// resolution, REPLACE semantics, per-channel SOUL.md) | All three must be fixed for personas to work correctly |
 
 ## 9. Decisions Pending
 
-| Decision | Depends On | Blocked By |
-|----------|-----------|-----------|
-| Agent isolation level (Q1) | Your call | Nothing — ready for decision |
-| SOUL.md fix approach | Phase 0 investigation results | Need to understand merge behavior first |
-| Memory scoping (Q5) | Q1 outcome | Agent isolation decision |
-| Skill curation (Q6) | Q1 + Q3 outcomes | Agent isolation + comms decisions |
-| Channel renaming (Q2) | Your call | Nothing — low priority |
-| Startup script fate (Q4) | Your call | Nothing — low priority |
+| Decision | Depends On | Status |
+|----------|-----------|--------|
+| Full isolation (Option B vs staying shared) | Trial week results (H1-H5) | Trial after Phase 1-2 |
+| Memory scoping (Q5) | Isolation decision | Blocked by trial |
+| Skill curation (Q6) | Isolation decision | Blocked by trial |
+| Channel renaming (Q2) | Nothing — ready when convenient | Low priority |
+| Mac Mini migration timing | Architecture stability | After trial decision |
 
 ---
 
 ## 10. Reasoning & Rationale
 
-**Why Phase 0 before Phase 1?** Our own working philosophy is explicit: reproduce → isolate → root cause → fix. I violated this in DRAFT v1 by prescribing "agent-neutral SOUL.md" as the fix before understanding how channel_prompts actually merges with SOUL.md. The right approach is to investigate first, then fix based on evidence. This is not slower — it prevents building the wrong fix.
+**Why Phase 0 before Phase 1?** Our working philosophy is explicit: reproduce → isolate → root cause → fix. The investigation revealed that the problem was not what we initially assumed (merge behavior alone) but three compounding bugs. The fix must address all three. Designing the fix before the investigation would have missed bugs 1 and 3.
 
-**Why defer reasoning block stripping?** The reasoning block leak is what caught the identity confusion. In our context (private server, one user), it's a feature masquerading as a bug. If a concrete harm is identified later (e.g., sensitive internal reasoning exposed to guests, or token waste from sending reasoning to Discord), we'll revisit.
+**Why trial before isolation?** The fleet has operated with zero persona differentiation for its entire lifetime. We have no data on how well shared home works when agents actually have distinct identities. Architecting isolation without this data risks solving the wrong problem. That said, the token efficiency and quality arguments for isolation are strong — the trial is about getting evidence, not about being agnostic on the outcome.
 
-**Why is Q1 the most important open question?** It determines the shape of everything else. Memory scoping, skill curation, process management, file structure — all of these are downstream of whether we formalize shared-home or invest in separation. The cons of shared-home (listed under Q1) are real and should be weighed against the simplicity benefits.
+**Why is token efficiency the strongest argument for isolation?** The skills section alone is thousands of tokens loaded into every agent's context. Aurus loads GitHub workflow, code review, and security reviewer skills that are completely irrelevant to financial learning. This wastes tokens and pollutes reasoning. Under isolation, each agent loads only relevant skills. Lean context = better reasoning + lower cost. Since the fleet is infrastructure for all future projects, this compounds exponentially.
+
+**Why defer reasoning block stripping?** The reasoning block leak is what caught the identity confusion. In our context (private server, one user), it's a feature masquerading as a bug. If a concrete harm is identified later, we'll revisit.
+
+**Why keep agent homes instead of removing them?** They enable CLI access per agent (`HERMES_HOME=~/.aurus hermes`). This gives us a second access mode beyond Discord, useful for debugging and direct agent interaction. The cost is minimal (a few files per home) and they're already mostly set up.
